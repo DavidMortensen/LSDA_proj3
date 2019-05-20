@@ -58,8 +58,6 @@ object SentimentAnalyser {
   }
 
 
-
-
   /**
     * Given a list of vectors (embeddings), each of Double values, calculate the sum of these vectors and then divide it by their number
     * to get the average
@@ -77,10 +75,19 @@ object SentimentAnalyser {
           * @param v2
           * @return the sum of vectors v1 and v2
           */
-        def sumVect(v1:Seq[Double], v2:Seq[Double]):Seq[Double] = ???
-
+        def sumVect(v1:Seq[Double], v2:Seq[Double]):Seq[Double] = {
+          if (v1.size != 0){
+            (v1, v2).zipped.map(_ + _)
+          }
+        
+          else{
+            v2
+          }
         //return value for the udf averageVectors
-        ???
+        }
+        val sum = embeddings.reduce(sumVect)
+        val avgVector = sum.map(_ / embeddings.size)
+        avgVector
       }
   }
 
@@ -124,7 +131,25 @@ object SentimentAnalyser {
     * @param glove
     * @return a DataFrame that has the following columns: id, overall, averageVectorEmbedding
     */
-  def generateAvgWordEmbeddingVector(reviews : DataFrame, glove: DataFrame) : DataFrame = ???
+  def generateAvgWordEmbeddingVector(reviews : DataFrame, glove: DataFrame) : DataFrame = {
+    val tokenizer = new Tokenizer().setInputCol("text").setOutputCol("words")
+    val countTokens = udf { (words: Seq[String]) => words.length }
+
+    val tokenized = tokenizer.transform(reviews)
+    //tokenized.select("text", "words")
+    //.withColumn("tokens", countTokens(col("words")))
+
+    //Explode dataframe:
+    .withColumn("words", explode($"words")).drop("text")
+
+    //Merge with glove:
+    .select($"id", $"overall", $"words")
+    .join(glove, col("words") === col("word"), "left")
+    .groupBy("id", "overall").agg(averageVectors(collect_list("vec")).alias("averageVectorEmbedding"))
+
+    tokenized
+    }
+    
 
 
   /**
@@ -139,8 +164,19 @@ object SentimentAnalyser {
     * @return a DataFrame that has the following columns: id, normalizedRating, averageVectorEmbedding
     */
   def mapReviewRatings(reviews : DataFrame) : DataFrame = {
-    val normalizedRating = udf {(rating : Double) => ??? }
-    ???
+    val normalizedRating = udf {(rating : Double) => {
+      if (rating < 3){
+        0
+      }
+      else if (rating == 3){
+        1
+      }
+      else {
+        2
+      }
+    }
+    }
+    reviews.withColumn("normalizedRating", normalizedRating($"overall")).drop("overall")
   }
 
   /**
@@ -160,7 +196,13 @@ object SentimentAnalyser {
     * @param data
     * @return a DataFrame that has the following columns: id, label, features
     */
-  def prepareDatasetForClassifier(data: DataFrame):DataFrame = ???
+  def prepareDatasetForClassifier(data: DataFrame):DataFrame = {
+    val df = mapReviewRatings(data)
+    .withColumn("features", createDenseVector($"averageVectorEmbedding")).drop("averageVectorEmbedding")
+    .withColumnRenamed("normalizedRating", "label")
+    df
+    
+  }
 
   /**
     * You need to follow the example described at this
@@ -169,7 +211,31 @@ object SentimentAnalyser {
     *
     * @param reviews
     */
-  def trainAndValidateModel(reviews: DataFrame, numFeatures: Int, hiddenLayers1 : Int, hiddenLayers2 : Int, numIterations: Int):Unit = ???
+  def trainAndValidateModel(reviews: DataFrame, numFeatures: Int, hiddenLayers1 : Int, hiddenLayers2 : Int, numIterations: Int):Unit = {
+    val data = reviews.drop("id")
+    val splits = data.randomSplit(Array(0.6, 0.4), seed = 1234L)
+    val train = splits(0)
+    val test = splits(1) 
+
+  // specify layers for the neural network:
+    val layers = Array[Int](numFeatures, hiddenLayers1, hiddenLayers2, 3)
+
+    val trainer = new MultilayerPerceptronClassifier()
+    .setLayers(layers)
+    .setBlockSize(128)
+    .setSeed(1234L)
+    .setMaxIter(100)
+
+    val model = trainer.fit(train)
+
+    val result = model.transform(test)
+    val predictionAndLabels = result.select("prediction", "label")
+    val evaluator = new MulticlassClassificationEvaluator()
+      .setMetricName("accuracy")
+
+    println(s"Test set accuracy = ${evaluator.evaluate(predictionAndLabels)}")
+
+  }
 
 
   def main(args: Array[String]): Unit = {
@@ -180,24 +246,24 @@ object SentimentAnalyser {
     //load amazon reviews dataset
     val amazonDataFileName = conf.getString("Project3.amazonReviewFilePath")
     val amazonReviewsDF = loadAmazonReviews(amazonDataFileName)
-    amazonReviewsDF.show()
+    //amazonReviewsDF.show()
 
     //load glove corpus
-    //val gloveDataFileName = conf.getString("Project3.gloveFilePath")
-    //val gloveDF = loadGloVe(gloveDataFileName)
+    val gloveDataFileName = conf.getString("Project3.gloveFilePath")
+    val gloveDF = loadGloVe(gloveDataFileName)
 
     //Phase 1: generate an embedding (average vector for all the words in the review) for each tuple/row in the input dataset
-    //val amazonReviewsAvgVectorDF = generateAvgWordEmbeddingVector(amazonReviewsDF,gloveDF)
-
+    val amazonReviewsAvgVectorDF = generateAvgWordEmbeddingVector(amazonReviewsDF,gloveDF)
+    //amazonReviewsAvgVectorDF.show()
     //Phase 2 and 3: prepare the data for the classifier, then train it and cross-validate
-    //val preparedDataDF = prepareDatasetForClassifier(amazonReviewsAvgVectorDF)
+    val preparedDataDF = prepareDatasetForClassifier(amazonReviewsAvgVectorDF)
 
 
-    //val numFeatures = conf.getInt("Project3.numFeatures")
-    //val hiddenLayers1 = conf.getInt("Project3.hiddenLayers1")
-    //val hiddenLayers2 = conf.getInt("Project3.hiddenLayers2")
-    //val numIterations = conf.getInt("Project3.numIterations")
-    //trainAndValidateModel(preparedDataDF, numFeatures,hiddenLayers1, hiddenLayers2, numIterations)
+    val numFeatures = conf.getInt("Project3.numFeatures")
+    val hiddenLayers1 = conf.getInt("Project3.hiddenLayers1")
+    val hiddenLayers2 = conf.getInt("Project3.hiddenLayers2")
+    val numIterations = conf.getInt("Project3.numIterations")
+    trainAndValidateModel(preparedDataDF, numFeatures, hiddenLayers1, hiddenLayers2, numIterations)
 
 
     //close spark session
